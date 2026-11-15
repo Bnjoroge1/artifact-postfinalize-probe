@@ -192,6 +192,10 @@ async function cacheMode () {
     const size = label === 'exact' ? String(body.length) : label === 'off_by_one' ? String(body.length + 1) : declared
     const f = await twirpCache('FinalizeCacheEntryUpload', {key: k, version: v, size_bytes: size})
     console.log(`CACHE_SIZE_${label}_FINALIZE declared=${size} -> ${f.status} ${JSON.stringify(f.json).slice(0, 160)}`)
+    if (f.status !== 200) {
+      const retry = await twirpCache('FinalizeCacheEntryUpload', {key: k, version: v, size_bytes: String(body.length)})
+      console.log(`CACHE_SIZE_${label}_RETRY_CORRECT_SIZE -> ${retry.status} ${JSON.stringify(retry.json).slice(0, 160)}`)
+    }
     const d = await twirpCache('GetCacheEntryDownloadURL', {key: k, version: v, restore_keys: [k]})
     console.log(`CACHE_SIZE_${label}_LOOKUP ok=${d.json.ok}`)
   }
