@@ -76,6 +76,21 @@ async function main () {
       workflow_job_run_backend_id: ids.workflowJobRunBackendId,
       name: 'probe', size: String(bytes.length), hash: `sha256:${sha(bytes)}`
     })
+    // Does the service verify the client-declared hash at finalize?
+    const created2 = await twirp('CreateArtifact', {
+      workflow_run_backend_id: ids.workflowRunBackendId,
+      workflow_job_run_backend_id: ids.workflowJobRunBackendId,
+      name: 'badhash', version: 4
+    })
+    const uploadUrl2 = pick(created2.json, 'signed_upload_url', 'signedUploadUrl')
+    const bytes2 = makeZip('BADHASH')
+    console.log(`HASHCHECK_PUT=${await putBlob(uploadUrl2, bytes2, {'x-ms-blob-type': 'BlockBlob', 'content-type': 'application/zip', spec: 'original'})} actual_sha=${sha(bytes2)}`)
+    const fin2 = await twirp('FinalizeArtifact', {
+      workflow_run_backend_id: ids.workflowRunBackendId,
+      workflow_job_run_backend_id: ids.workflowJobRunBackendId,
+      name: 'badhash', size: String(bytes2.length), hash: `sha256:${'0'.repeat(64)}`
+    })
+    console.log(`HASHCHECK_FINALIZE_WRONG_HASH status=${fin2.status} body=${JSON.stringify(fin2.json).slice(0, 200)}`)
     return
   }
 
