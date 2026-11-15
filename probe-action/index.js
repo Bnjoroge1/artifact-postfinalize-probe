@@ -56,7 +56,7 @@ async function main () {
     const created = await twirp('CreateArtifact', {
       workflow_run_backend_id: ids.workflowRunBackendId,
       workflow_job_run_backend_id: ids.workflowJobRunBackendId,
-      name: 'probe', version: 7
+      name: 'probe', version: 4
     })
     const uploadUrl = pick(created.json, 'signed_upload_url', 'signedUploadUrl')
     console.log(`upload_blob_path=${sas(uploadUrl)}`)
