@@ -12,7 +12,7 @@ jobs:
       upload_url: ${{ steps.probe.outputs.upload_url }}
     steps:
       - id: probe
-      - run: |
+        run: |
           set -eu
           TOKEN="${ACTIONS_RUNTIME_TOKEN#Bearer }"
           PAYLOAD=$(printf '%s' "$TOKEN" | cut -d. -f2 | tr '_-' '/+')
