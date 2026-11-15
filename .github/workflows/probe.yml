@@ -37,3 +37,10 @@ jobs:
           set -eu
           ls -la got
           echo "GOT_CONTENT=$(cat got/payload.txt)"
+  d-cache-probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./probe-action
+        with:
+          mode: cache

@@ -16,9 +16,9 @@ function backendIds () {
   return {workflowRunBackendId: runId, workflowJobRunBackendId: jobId}
 }
 
-async function twirp (method, body) {
+async function twirpAt (service, method, body) {
   const headers = {'content-type': 'application/json', authorization: `Bearer ${token}`}
-  const res = await fetch(`${base}/twirp/github.actions.results.api.v1.ArtifactService/${method}`, {
+  const res = await fetch(`${base}/twirp/${service}/${method}`, {
     method: 'POST', headers, body: JSON.stringify(body)
   })
   const text = await res.text()
@@ -27,6 +27,10 @@ async function twirp (method, body) {
   try { json = text ? JSON.parse(text) : {} } catch (e) { console.log(`  (non-JSON body)`) }
   return {status: res.status, json}
 }
+const twirp = (method, body) =>
+  twirpAt('github.actions.results.api.v1.ArtifactService', method, body)
+const twirpCache = (method, body) =>
+  twirpAt('github.actions.results.api.v1.CacheService', method, body)
 // proto field names on the wire are snake_case (verified against captured
 // official-runner traffic): signed_upload_url, workflow_run_backend_id, ...
 const pick = (o, ...keys) => keys.map(k => o?.[k]).find(v => v !== undefined)
@@ -115,4 +119,58 @@ async function main () {
   }
 }
 
-main().catch(e => { console.error(e); process.exit(1) })
+async function cacheMode () {
+  const put = (url, bytes) => fetch(url, {method: 'PUT', headers: {'x-ms-blob-type': 'BlockBlob', 'content-type': 'application/octet-stream'}, body: bytes})
+  const run = process.env.GITHUB_RUN_ID
+  const key = `probe-cache-${run}-${Date.now()}`
+  const version = crypto.randomBytes(32).toString('hex')
+  const created = await twirpCache('CreateCacheEntry', {key, version})
+  const uploadUrl = pick(created.json, 'signed_upload_url', 'signedUploadUrl')
+  console.log(`cache_key=${key}`)
+  console.log(`cache_upload_path=${uploadUrl ? new URL(uploadUrl).pathname : 'none'} sp=${uploadUrl ? new URL(uploadUrl).searchParams.get('sp') : '-'}`)
+  const A = Buffer.from('CACHE-A-ORIGINAL-BYTES\n')
+  console.log(`CACHE_PUT_A=${(await put(uploadUrl, A)).status}`)
+  const fin = await twirpCache('FinalizeCacheEntryUpload', {key, version, size_bytes: String(A.length)})
+  console.log(`cache_entry_id=${pick(fin.json, 'entry_id', 'entryId')} declared_size=${A.length}`)
+  const B = Buffer.from('CACHE-B-POST-FINALIZE-MUTATION\n')
+  console.log(`CACHE_PUT_B_POST_FINALIZE=${(await put(uploadUrl, B)).status}`)
+  let dlUrl = null
+  for (let attempt = 1; attempt <= 6 && !dlUrl; attempt++) {
+    const dl = await twirpCache('GetCacheEntryDownloadURL', {key, version, restore_keys: [key]})
+    dlUrl = pick(dl.json, 'signed_download_url', 'signedDownloadUrl') || null
+    console.log(`CACHE_LOOKUP attempt=${attempt} ok=${dl.json.ok} matched_key=${dl.json.matched_key || ''} path=${dlUrl ? new URL(dlUrl).pathname : 'none'}`)
+    if (!dlUrl) await new Promise(r => setTimeout(r, 3000))
+  }
+  if (dlUrl) {
+    console.log(`CACHE_DOWNLOAD_SP=${new URL(dlUrl).searchParams.get('sp')}`)
+    const res = await fetch(dlUrl)
+    const buf = Buffer.from(await res.arrayBuffer())
+    console.log(`CACHE_DOWNLOAD_STATUS=${res.status} bytes=${buf.length} expected_A=${A.length} expected_B=${B.length}`)
+    console.log(`CACHE_SERVED=${JSON.stringify(buf.toString())}`)
+  }
+  const again = await twirpCache('CreateCacheEntry', {key, version})
+  console.log(`CACHE_RECREATE_SAME_KEY status=${again.status} body=${JSON.stringify(again.json).slice(0, 200)}`)
+  // declared-size trust test on a second key
+  const key2 = `probe-cache-size-${run}-${Date.now()}`
+  const version2 = crypto.randomBytes(32).toString('hex')
+  const c2 = await twirpCache('CreateCacheEntry', {key: key2, version: version2})
+  const u2 = pick(c2.json, 'signed_upload_url', 'signedUploadUrl')
+  const C = Buffer.from('CACHE-C-12B\n')
+  console.log(`CACHE_PUT_C=${(await put(u2, C)).status} bytes=${C.length}`)
+  const fin2 = await twirpCache('FinalizeCacheEntryUpload', {key: key2, version: version2, size_bytes: '1'})
+  console.log(`CACHE_FINALIZE_DECLARED_1_ACTUAL_${C.length} status=${fin2.status} body=${JSON.stringify(fin2.json).slice(0, 200)}`)
+  const dl2 = await twirpCache('GetCacheEntryDownloadURL', {key: key2, version: version2, restore_keys: [key2]})
+  const du2 = pick(dl2.json, 'signed_download_url', 'signedDownloadUrl')
+  if (du2) {
+    const r2 = await fetch(du2)
+    const b2 = Buffer.from(await r2.arrayBuffer())
+    console.log(`CACHE2_SERVED status=${r2.status} bytes=${b2.length} body=${JSON.stringify(b2.toString())}`)
+  } else {
+    console.log(`CACHE2_LOOKUP ok=${dl2.json.ok} matched_key=${dl2.json.matched_key || ''}`)
+  }
+}
+
+async function main () {
+  if (mode === 'cache') return cacheMode()
+  const ids = backendIds()
+
