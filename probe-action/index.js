@@ -16,16 +16,20 @@ function backendIds () {
   return {workflowRunBackendId: runId, workflowJobRunBackendId: jobId}
 }
 
-async function twirp (method, body, auth = true) {
-  const headers = {'content-type': 'application/json'}
-  if (auth) headers.authorization = `Bearer ${token}`
+async function twirp (method, body) {
+  const headers = {'content-type': 'application/json', authorization: `Bearer ${token}`}
   const res = await fetch(`${base}/twirp/github.actions.results.api.v1.ArtifactService/${method}`, {
     method: 'POST', headers, body: JSON.stringify(body)
   })
   const text = await res.text()
   console.log(`twirp ${method} -> ${res.status} ${text.slice(0, 500)}`)
-  return {status: res.status, json: text ? JSON.parse(text) : {}}
+  let json = {}
+  try { json = text ? JSON.parse(text) : {} } catch (e) { console.log(`  (non-JSON body)`) }
+  return {status: res.status, json}
 }
+// proto field names on the wire are snake_case (verified against captured
+// official-runner traffic): signed_upload_url, workflow_run_backend_id, ...
+const pick = (o, ...keys) => keys.map(k => o?.[k]).find(v => v !== undefined)
 
 function makeZip (tag) {
   fs.writeFileSync('payload.txt', `${tag}\n`)
@@ -49,11 +53,12 @@ async function main () {
   const ids = backendIds()
 
   if (mode === 'upload') {
-    await twirp('GetArtifactServiceInfo', {}, false)
     const created = await twirp('CreateArtifact', {
-      ...ids, name: 'probe', version: 7, mimeType: {value: 'application/zip'}
+      workflow_run_backend_id: ids.workflowRunBackendId,
+      workflow_job_run_backend_id: ids.workflowJobRunBackendId,
+      name: 'probe', version: 7
     })
-    const uploadUrl = created.json.signedUploadUrl
+    const uploadUrl = pick(created.json, 'signed_upload_url', 'signedUploadUrl')
     console.log(`upload_blob_path=${sas(uploadUrl)}`)
     fs.writeFileSync('/tmp/upload-url', uploadUrl)
     fs.appendFileSync(process.env.GITHUB_OUTPUT, `upload_url=${uploadUrl}\n`)
@@ -62,7 +67,9 @@ async function main () {
     const code = await putBlob(uploadUrl, bytes, {'x-ms-blob-type': 'BlockBlob', 'content-type': 'application/zip', spec: 'original'})
     console.log(`PUT_PRE_FINALIZE=${code}`)
     await twirp('FinalizeArtifact', {
-      ...ids, name: 'probe', size: String(bytes.length), hash: {value: `sha256:${sha(bytes)}`}
+      workflow_run_backend_id: ids.workflowRunBackendId,
+      workflow_job_run_backend_id: ids.workflowJobRunBackendId,
+      name: 'probe', size: String(bytes.length), hash: `sha256:${sha(bytes)}`
     })
     return
   }
@@ -87,11 +94,15 @@ async function main () {
   const putCode = await putBlob(uploadUrl, bytes, {'x-ms-blob-type': 'BlockBlob', 'content-type': 'application/zip', spec: 'PutBlob'})
   console.log(`PUT_BLOB_POST_FINALIZE=${putCode}`)
 
-  const list = await twirp('ListArtifacts', ids)
+  const idsSnake = {
+    workflow_run_backend_id: ids.workflowRunBackendId,
+    workflow_job_run_backend_id: ids.workflowJobRunBackendId
+  }
+  const list = await twirp('ListArtifacts', idsSnake)
   const found = (list.json.artifacts || []).find(a => a.name === 'probe')
   console.log(`listed_artifact=${JSON.stringify(found)}`)
-  const signed = await twirp('GetSignedArtifactURL', {...ids, name: 'probe'})
-  const dlUrl = signed.json.signedUrl
+  const signed = await twirp('GetSignedArtifactURL', {...idsSnake, name: 'probe'})
+  const dlUrl = pick(signed.json, 'signed_url', 'signedUrl')
   console.log(`download_blob_path=${dlUrl ? sas(dlUrl) : 'none'}`)
   if (dlUrl) {
     const res = await fetch(dlUrl)
