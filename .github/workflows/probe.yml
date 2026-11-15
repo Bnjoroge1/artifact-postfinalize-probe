@@ -1,0 +1,79 @@
+# Probe: after FinalizeArtifact, does the official artifact-v4 backend still
+# accept writes to the CreateArtifact signedUploadUrl, and do those bytes reach
+# a later downloader?
+name: artifact-post-finalize-overwrite-probe
+on: [push, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  a-upload-finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          set -eu
+          TOKEN="${ACTIONS_RUNTIME_TOKEN#Bearer }"
+          PAYLOAD=$(printf '%s' "$TOKEN" | cut -d. -f2 | tr '_-' '/+')
+          case $(( ${#PAYLOAD} % 4 )) in 2) PAYLOAD="${PAYLOAD}==";; 3) PAYLOAD="${PAYLOAD}=";; esac
+          RUN=$(printf '%s' "$PAYLOAD" | base64 -d | jq -r .workflow_run_backend_id)
+          JOB=$(printf '%s' "$PAYLOAD" | base64 -d | jq -r .workflow_job_run_backend_id)
+          echo "run=$RUN job=$JOB"
+          BASE="${ACTIONS_RESULTS_URL:-x}"; BASE="${BASE%/}"
+          URL="$BASE/twirp/github.actions.results.api.v1.ArtifactService"
+          echo "SERVICE_INFO: $(curl -sS --max-time 30 "$URL/GetArtifactServiceInfo" -H 'content-type: application/json' -d '{}' | head -c 300)"
+          printf '%s' '{"workflowRunBackendId":"'"$RUN"'","workflowJobRunBackendId":"'"$JOB"'","name":"probe","version":7,"mimeType":{"value":"application/zip"}}' > /tmp/create.json
+          curl -sS --max-time 30 "$URL/CreateArtifact" -H 'content-type: application/json' -H "authorization: Bearer $TOKEN" -d @/tmp/create.json > /tmp/create.out
+          echo "CREATE_OUT: $(cat /tmp/create.out)"
+          jq -r .signedUploadUrl /tmp/create.out > /tmp/upload-url
+          echo "ORIGINAL PAYLOAD" > payload.txt && zip -q blob.zip payload.txt
+          SIZE=$(wc -c < blob.zip | tr -d ' ')
+          HASH=$(sha256sum blob.zip | cut -d' ' -f1)
+          echo "PUT_PRE_FINALIZE_CODE=$(curl -sS --max-time 60 -o /dev/null -w '%{http_code}' -X PUT --upload-file blob.zip "$(cat /tmp/upload-url)")"
+          printf '%s' '{"workflowRunBackendId":"'"$RUN"'","workflowJobRunBackendId":"'"$JOB"'","name":"probe","size":"'"$SIZE"'","hash":{"value":"sha256:'"$HASH"'"}}' > /tmp/fin.json
+          curl -sS --max-time 30 "$URL/FinalizeArtifact" -H 'content-type: application/json' -H "authorization: Bearer $TOKEN" -d @/tmp/fin.json > /tmp/fin.out
+          echo "FINALIZE_OUT: $(cat /tmp/fin.out)"
+  b-post-finalize-overwrite:
+    runs-on: ubuntu-latest
+    needs: a-upload-finalize
+    steps:
+      - run: |
+          set -eu
+          TOKEN="${ACTIONS_RUNTIME_TOKEN#Bearer }"
+          PAYLOAD=$(printf '%s' "$TOKEN" | cut -d. -f2 | tr '_-' '/+')
+          case $(( ${#PAYLOAD} % 4 )) in 2) PAYLOAD="${PAYLOAD}==";; 3) PAYLOAD="${PAYLOAD}=";; esac
+          RUN=$(printf '%s' "$PAYLOAD" | base64 -d | jq -r .workflow_run_backend_id)
+          JOB=$(printf '%s' "$PAYLOAD" | base64 -d | jq -r .workflow_job_run_backend_id)
+          BASE="${ACTIONS_RESULTS_URL:-x}"; BASE="${BASE%/}"
+          URL="$BASE/twirp/github.actions.results.api.v1.ArtifactService"
+          echo "MUTATED PAYLOAD" > payload.txt && zip -q blob-b.zip payload.txt
+          BHASH=$(sha256sum blob-b.zip | cut -d' ' -f1)
+          sleep 3
+          echo "PUT_POST_FINALIZE_CODE=$(curl -sS --max-time 60 -o /dev/null -w '%{http_code}' -D /tmp/put2.hdr -X PUT --upload-file blob-b.zip "$(cat /tmp/upload-url)")"
+          echo "--- put2 headers ---"; cat /tmp/put2.hdr 2>/dev/null | head -12 || true
+          sleep 2
+          echo "PUT_POST_FINALIZE_CODE_RETRY=$(curl -sS --max-time 60 -o /dev/null -w '%{http_code}' -X PUT --upload-file blob-b.zip "$(cat /tmp/upload-url)")"
+          echo "MUTATION_SHA=$BHASH"
+          printf '%s' '{"workflowRunBackendId":"'"$RUN"'","workflowJobRunBackendId":"'"$JOB"'","name":"probe"}' > /tmp/lookup.json
+          curl -sS --max-time 30 "$URL/GetSignedArtifactURL" -H 'content-type: application/json' -H "authorization: Bearer $TOKEN" -d @/tmp/lookup.json > /tmp/lookup.out || true
+          echo "LOOKUP_OUT: $(cat /tmp/lookup.out 2>/dev/null || echo none)"
+          curl -sS --max-time 30 "$URL/ListArtifacts" -H 'content-type: application/json' -H "authorization: Bearer $TOKEN" -d '{"workflowRunBackendId":"'"$RUN"'","workflowJobRunBackendId":"'"$JOB"'"}' > /tmp/list.out || true
+          echo "LIST_OUT: $(cat /tmp/list.out 2>/dev/null || echo none)"
+          DL=$(jq -r '.signedUrl // empty' /tmp/lookup.out 2>/dev/null || true)
+          [ -z "$DL" ] && DL=$(jq -r '[.artifacts[]? | select(.name=="probe")][0].signedUrl // empty' /tmp/list.out 2>/dev/null || true)
+          echo "DL_URL_HEAD=$(printf '%s' "$DL" | cut -c1-100)"
+          if [ -n "$DL" ]; then
+            echo "DL_CODE=$(curl -sS --max-time 60 -o /tmp/dl.zip -w '%{http_code}' "$DL" || echo curlfail)"
+            echo "DL_SHA=$(sha256sum /tmp/dl.zip | cut -d' ' -f1)"
+            mkdir -p /tmp/dl && (cd /tmp/dl && rm -f * && unzip -o -q /tmp/dl.zip && echo "DL_CONTENT: $(cat payload.txt)") || echo "UNZIP_FAILED"
+          fi
+  c-downstream-download:
+    runs-on: ubuntu-latest
+    needs: [a-upload-finalize, b-post-finalize-overwrite]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: probe
+          path: got
+      - run: |
+          set -eu
+          ls -la got
+          echo "GOT_CONTENT: $(cat got/payload.txt)"
