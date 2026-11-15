@@ -54,6 +54,7 @@ async function putBlob (url, bytes, headers = {}) {
 }
 
 async function main () {
+  if (mode === 'cache') return cacheMode()
   const ids = backendIds()
 
   if (mode === 'upload') {
@@ -170,7 +171,5 @@ async function cacheMode () {
   }
 }
 
-async function main () {
-  if (mode === 'cache') return cacheMode()
-  const ids = backendIds()
+main().catch(e => { console.error(e); process.exit(1) })
 
