@@ -91,6 +91,21 @@ async function main () {
       name: 'badhash', size: String(bytes2.length), hash: `sha256:${'0'.repeat(64)}`
     })
     console.log(`HASHCHECK_FINALIZE_WRONG_HASH status=${fin2.status} body=${JSON.stringify(fin2.json).slice(0, 200)}`)
+    // Does it verify the declared size at all?
+    const created3 = await twirp('CreateArtifact', {
+      workflow_run_backend_id: ids.workflowRunBackendId,
+      workflow_job_run_backend_id: ids.workflowJobRunBackendId,
+      name: 'badsize', version: 4
+    })
+    const uploadUrl3 = pick(created3.json, 'signed_upload_url', 'signedUploadUrl')
+    const bytes3 = makeZip('BADSIZE')
+    console.log(`SIZECHECK_PUT=${await putBlob(uploadUrl3, bytes3, {'x-ms-blob-type': 'BlockBlob', 'content-type': 'application/zip', spec: 'original'})} actual=${bytes3.length}`)
+    const fin3 = await twirp('FinalizeArtifact', {
+      workflow_run_backend_id: ids.workflowRunBackendId,
+      workflow_job_run_backend_id: ids.workflowJobRunBackendId,
+      name: 'badsize', size: String(bytes3.length + 1), hash: `sha256:${sha(bytes3)}`
+    })
+    console.log(`SIZECHECK_FINALIZE_DECLARED_${bytes3.length + 1}_ACTUAL_${bytes3.length} status=${fin3.status} body=${JSON.stringify(fin3.json).slice(0, 200)}`)
     return
   }
 
