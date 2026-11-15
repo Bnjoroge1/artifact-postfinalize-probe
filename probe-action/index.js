@@ -151,23 +151,19 @@ async function cacheMode () {
   }
   const again = await twirpCache('CreateCacheEntry', {key, version})
   console.log(`CACHE_RECREATE_SAME_KEY status=${again.status} body=${JSON.stringify(again.json).slice(0, 200)}`)
-  // declared-size trust test on a second key
-  const key2 = `probe-cache-size-${run}-${Date.now()}`
-  const version2 = crypto.randomBytes(32).toString('hex')
-  const c2 = await twirpCache('CreateCacheEntry', {key: key2, version: version2})
-  const u2 = pick(c2.json, 'signed_upload_url', 'signedUploadUrl')
-  const C = Buffer.from('CACHE-C-12B\n')
-  console.log(`CACHE_PUT_C=${(await put(u2, C)).status} bytes=${C.length}`)
-  const fin2 = await twirpCache('FinalizeCacheEntryUpload', {key: key2, version: version2, size_bytes: '1'})
-  console.log(`CACHE_FINALIZE_DECLARED_1_ACTUAL_${C.length} status=${fin2.status} body=${JSON.stringify(fin2.json).slice(0, 200)}`)
-  const dl2 = await twirpCache('GetCacheEntryDownloadURL', {key: key2, version: version2, restore_keys: [key2]})
-  const du2 = pick(dl2.json, 'signed_download_url', 'signedDownloadUrl')
-  if (du2) {
-    const r2 = await fetch(du2)
-    const b2 = Buffer.from(await r2.arrayBuffer())
-    console.log(`CACHE2_SERVED status=${r2.status} bytes=${b2.length} body=${JSON.stringify(b2.toString())}`)
-  } else {
-    console.log(`CACHE2_LOOKUP ok=${dl2.json.ok} matched_key=${dl2.json.matched_key || ''}`)
+  // declared-size trust: control (exact) vs off-by-one vs bogus
+  for (const [label, declared] of [['exact', null], ['off_by_one', null], ['bogus_1', '1']]) {
+    const k = `probe-cache-size-${label}-${run}-${Date.now()}`
+    const v = crypto.randomBytes(32).toString('hex')
+    const c = await twirpCache('CreateCacheEntry', {key: k, version: v})
+    const u = pick(c.json, 'signed_upload_url', 'signedUploadUrl')
+    const body = Buffer.from('CACHE-SIZE-TEST\n')
+    console.log(`CACHE_SIZE_${label}_PUT=${(await put(u, body)).status} actual=${body.length}`)
+    const size = label === 'exact' ? String(body.length) : label === 'off_by_one' ? String(body.length + 1) : declared
+    const f = await twirpCache('FinalizeCacheEntryUpload', {key: k, version: v, size_bytes: size})
+    console.log(`CACHE_SIZE_${label}_FINALIZE declared=${size} -> ${f.status} ${JSON.stringify(f.json).slice(0, 160)}`)
+    const d = await twirpCache('GetCacheEntryDownloadURL', {key: k, version: v, restore_keys: [k]})
+    console.log(`CACHE_SIZE_${label}_LOOKUP ok=${d.json.ok}`)
   }
 }
 
