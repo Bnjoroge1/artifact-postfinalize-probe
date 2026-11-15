@@ -1,0 +1,12 @@
+name: artifact-postfin-probe
+description: Probe official artifact v4 backend for post-finalize write acceptance
+inputs:
+  mode:
+    description: upload | mutate
+    required: true
+  upload_url:
+    description: signed upload URL captured in the upload phase
+    required: false
+runs:
+  using: node20
+  main: index.js
